@@ -79,8 +79,8 @@ export default function FlowchartsPage({navigation, route}) {
   const peopleStore = useStore('people');
   const flowchartsStore = useStore('flowcharts');
   const {colors: themeColors = {}} = themeStore.getters || {};
-  const {currentCompany = {}, mainCompany = {}} = peopleStore.getters || {};
-  const company = currentCompany?.id ? currentCompany : mainCompany;
+  const {currentCompany = {}, defaultCompany = {}} = peopleStore.getters || {};
+  const company = currentCompany?.id ? currentCompany : defaultCompany;
 
   const palette = useMemo(
     () =>
