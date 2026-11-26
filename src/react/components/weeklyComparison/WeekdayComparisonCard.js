@@ -1,7 +1,7 @@
 import React, {useMemo} from 'react';
 import {ScrollView, Text, View} from 'react-native';
 import {MaterialCommunityIcons} from '@expo/vector-icons';
-import {withOpacity} from '@controleonline/../../src/styles/branding';
+import {withOpacity} from '@controleonline/ui-layout/src/styles/branding';
 import {
   formatDecimal,
   formatInteger,
