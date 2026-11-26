@@ -5,8 +5,8 @@ import {SafeAreaView} from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Feather';
 import {useStore} from '@store';
 import {app_type_base} from '@appType';
-import {resolveThemePalette, withOpacity} from '@controleonline/../../src/styles/branding';
-import {colors} from '@controleonline/../../src/styles/colors';
+import {resolveThemePalette, withOpacity} from '@controleonline/ui-layout/src/styles/branding';
+import {colors} from '@controleonline/ui-layout/src/styles/colors';
 import {env as APP_ENV} from '@env';
 import {resolveAppDomain} from '@controleonline/ui-common/src/utils/appDomain';
 import Formatter from '@controleonline/ui-common/src/utils/formatter';
@@ -79,8 +79,8 @@ export default function FlowchartsPage({navigation, route}) {
   const peopleStore = useStore('people');
   const flowchartsStore = useStore('flowcharts');
   const {colors: themeColors = {}} = themeStore.getters || {};
-  const {currentCompany = {}, defaultCompany = {}} = peopleStore.getters || {};
-  const company = currentCompany?.id ? currentCompany : defaultCompany;
+  const {currentCompany = {}, mainCompany = {}} = peopleStore.getters || {};
+  const company = currentCompany?.id ? currentCompany : mainCompany;
 
   const palette = useMemo(
     () =>
