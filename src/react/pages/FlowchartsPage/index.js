@@ -1,5 +1,5 @@
 /* eslint-disable no-unused-vars -- The current flat ESLint config does not mark JSX identifiers as used. */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, ScrollView, Text, View} from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Feather';
@@ -9,15 +9,23 @@ import {resolveThemePalette, withOpacity} from '@controleonline/../../src/styles
 import {colors} from '@controleonline/../../src/styles/colors';
 import {env as APP_ENV} from '@env';
 import {resolveAppDomain} from '@controleonline/ui-common/src/utils/appDomain';
-import Formatter from '@controleonline/ui-common/src/utils/formatter';
 import FlowchartVisualEditor from './FlowchartVisualEditor';
 import MermaidDiagram from './MermaidDiagram';
+import FlowchartMaximizedOverlay from './FlowchartMaximizedOverlay';
 import {createStyles} from './index.styles';
-
-const NEW_FLOW_ID = '__new-flowchart__';
-const DEFAULT_NEW_MERMAID = `flowchart TD
-  start["Novo fluxo"] --> step["Edite o Mermaid"]
-  step --> done["Salvar no tenant"]`;
+import {
+  NEW_FLOW_ID,
+  DEFAULT_NEW_MERMAID,
+  normalizeFlowId,
+  repairText,
+  normalizeFlowchart,
+  buildFlowKey,
+  normalizeFlowcharts,
+  digitsOnly,
+  shouldNavigateToFlowId,
+  shouldLoadFlowById,
+  resolveActiveFlow,
+} from './flowchartUtils';
 
 const buildPalette = basePalette => ({
   ...basePalette,
@@ -29,58 +37,13 @@ const buildPalette = basePalette => ({
   iconBackground: withOpacity(basePalette.primary, 0.12),
 });
 
-const normalizeFlowId = flow => String(flow?.id || flow?.flowKey || flow?.flow_key || '');
-
-const repairText = value => Formatter.repairMojibake(value);
-
-const normalizeFlowchart = flow => {
-  if (!flow) {
-    return null;
-  }
-
-  return {
-    ...flow,
-    checkpoints: Array.isArray(flow.checkpoints)
-      ? flow.checkpoints.map(checkpoint => repairText(checkpoint))
-      : flow.checkpoints,
-    summary: repairText(flow.summary),
-    title: repairText(flow.title),
-  };
-};
-
-const buildFlowKey = title => {
-  const slug = String(title || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return `${slug || 'fluxo'}-${Date.now()}`;
-};
-
-const normalizeFlowcharts = flowcharts =>
-  (Array.isArray(flowcharts) ? flowcharts : [])
-    .filter(flow => flow && flow.enabled !== false)
-    .map(normalizeFlowchart)
-    .sort((a, b) => {
-      const sortA = Number(a.sortOrder ?? a.sort_order ?? 0);
-      const sortB = Number(b.sortOrder ?? b.sort_order ?? 0);
-
-      if (sortA !== sortB) {
-        return sortA - sortB;
-      }
-
-      return String(a.title || '').localeCompare(String(b.title || ''));
-    });
-
 export default function FlowchartsPage({navigation, route}) {
   const themeStore = useStore('theme');
   const peopleStore = useStore('people');
   const flowchartsStore = useStore('flowcharts');
   const {colors: themeColors = {}} = themeStore.getters || {};
-  const {currentCompany = {}, defaultCompany = {}} = peopleStore.getters || {};
-  const company = currentCompany?.id ? currentCompany : defaultCompany;
+  const {currentCompany = {}, mainCompany = {}} = peopleStore.getters || {};
+  const company = currentCompany?.id ? currentCompany : mainCompany;
 
   const palette = useMemo(
     () =>
@@ -102,25 +65,18 @@ export default function FlowchartsPage({navigation, route}) {
     () => normalizeFlowchart(flowchartsStore.getters?.item),
     [flowchartsStore.getters?.item],
   );
-  const routeFlowId = String(route?.params?.id || '').replace(/\D+/g, '');
+  const routeFlowId = digitsOnly(route?.params?.id);
   const [activeFlowId, setActiveFlowId] = useState('');
   const [isCreatingFlow, setIsCreatingFlow] = useState(false);
+  const loadingFlowIdRef = useRef('');
   const activeFlow = useMemo(
-    () => {
-      if (isCreatingFlow) {
-        return null;
-      }
-
-      const loadedFlowId = normalizeFlowId(loadedFlow);
-
-      if (activeFlowId && loadedFlowId === activeFlowId) {
-        return loadedFlow;
-      }
-
-      return flowcharts.find(flow => normalizeFlowId(flow) === activeFlowId) ||
-      flowcharts[0] ||
-      null;
-    },
+    () =>
+      resolveActiveFlow({
+        isCreatingFlow,
+        activeFlowId,
+        loadedFlow,
+        flowcharts,
+      }),
     [activeFlowId, flowcharts, isCreatingFlow, loadedFlow],
   );
   const [draftTitle, setDraftTitle] = useState('');
@@ -150,10 +106,11 @@ export default function FlowchartsPage({navigation, route}) {
       .catch(() => undefined);
   }, [flowchartsStore.actions, isAdminApp]);
 
-  const syncUrlFlowId = useCallback(
+  // Route-only navigation; load is driven by routeFlowId effect (avoids click race).
+  const navigateToFlowId = useCallback(
     flowId => {
-      const normalizedFlowId = String(flowId || '').replace(/\D+/g, '');
-      if (!normalizedFlowId || normalizedFlowId === routeFlowId) {
+      const normalizedFlowId = digitsOnly(flowId);
+      if (!shouldNavigateToFlowId(normalizedFlowId, routeFlowId)) {
         return;
       }
 
@@ -169,18 +126,30 @@ export default function FlowchartsPage({navigation, route}) {
 
   const loadFlowById = useCallback(
     flowId => {
-      const normalizedFlowId = String(flowId || '').replace(/\D+/g, '');
-      if (!normalizedFlowId) {
-        return Promise.resolve(null);
+      const normalizedFlowId = digitsOnly(flowId);
+      if (
+        !shouldLoadFlowById({
+          targetFlowId: normalizedFlowId,
+          loadingFlowId: loadingFlowIdRef.current,
+          loadedFlowId: normalizeFlowId(flowchartsStore.getters?.item),
+          activeFlowId,
+        })
+      ) {
+        return Promise.resolve(
+          digitsOnly(normalizeFlowId(flowchartsStore.getters?.item)) ===
+            normalizedFlowId
+            ? flowchartsStore.getters?.item
+            : null,
+        );
       }
 
+      loadingFlowIdRef.current = normalizedFlowId;
       setActiveFlowId(normalizedFlowId);
       setIsCreatingFlow(false);
       setIsEditingFlow(false);
       setIsFlowMaximized(false);
       setSaveStatus('');
       setSaveError('');
-      syncUrlFlowId(normalizedFlowId);
 
       return flowchartsStore.actions
         .get({
@@ -190,11 +159,17 @@ export default function FlowchartsPage({navigation, route}) {
         .catch(error => {
           setSaveError(String(error?.message || error || 'Falha ao carregar fluxograma.'));
           return null;
+        })
+        .finally(() => {
+          if (loadingFlowIdRef.current === normalizedFlowId) {
+            loadingFlowIdRef.current = '';
+          }
         });
     },
-    [flowchartsStore.actions, syncUrlFlowId],
+    [activeFlowId, flowchartsStore.actions, flowchartsStore.getters],
   );
 
+  // Route is the driver: any change to routeFlowId loads that flow once.
   useEffect(() => {
     if (!isAdminApp || !routeFlowId || isCreatingFlow) {
       return;
@@ -203,6 +178,7 @@ export default function FlowchartsPage({navigation, route}) {
     void loadFlowById(routeFlowId);
   }, [isAdminApp, isCreatingFlow, loadFlowById, routeFlowId]);
 
+  // Bootstrap when there is no route id yet.
   useEffect(() => {
     if (!flowcharts.length) {
       if (!isCreatingFlow) {
@@ -218,10 +194,11 @@ export default function FlowchartsPage({navigation, route}) {
     if (!flowcharts.some(flow => normalizeFlowId(flow) === activeFlowId)) {
       const firstFlowId = normalizeFlowId(flowcharts[0]);
       if (firstFlowId) {
-        void loadFlowById(firstFlowId);
+        setActiveFlowId(firstFlowId);
+        navigateToFlowId(firstFlowId);
       }
     }
-  }, [activeFlowId, flowcharts, isCreatingFlow, loadFlowById, routeFlowId]);
+  }, [activeFlowId, flowcharts, isCreatingFlow, navigateToFlowId, routeFlowId]);
 
   useEffect(() => {
     if (isCreatingFlow) {
@@ -304,7 +281,7 @@ export default function FlowchartsPage({navigation, route}) {
       setIsFlowMaximized(false);
       const savedFlowId = normalizeFlowId(saved);
       setActiveFlowId(savedFlowId);
-      syncUrlFlowId(savedFlowId);
+      navigateToFlowId(savedFlowId);
       setSaveStatus('Fluxograma salvo.');
     } catch (error) {
       setSaveError(String(error?.message || error || 'Falha ao salvar fluxograma.'));
@@ -318,7 +295,7 @@ export default function FlowchartsPage({navigation, route}) {
     flowchartsStore.actions,
     isCreatingFlow,
     isSaving,
-    syncUrlFlowId,
+    navigateToFlowId,
   ]);
 
   if (!isAdminApp) {
@@ -397,7 +374,13 @@ export default function FlowchartsPage({navigation, route}) {
                   accessibilityRole="button"
                   key={normalizeFlowId(flow)}
                   onPress={() => {
-                    void loadFlowById(normalizeFlowId(flow));
+                    const id = normalizeFlowId(flow);
+                    if (!id) {
+                      return;
+                    }
+                    setActiveFlowId(id);
+                    setIsCreatingFlow(false);
+                    navigateToFlowId(id);
                   }}
                   style={({pressed}) => [
                     styles.flowButton,
@@ -501,43 +484,12 @@ export default function FlowchartsPage({navigation, route}) {
           </View>
         </View>
       </ScrollView>
-      {previewFlow && isFlowMaximized ? (
-        <View style={styles.flowMaximizedBackdrop}>
-          <View style={styles.flowMaximizedPanel}>
-            <View style={styles.flowMaximizedHeader}>
-              <View style={styles.titleWrap}>
-                <Text style={styles.editorTitle}>{previewFlow.title}</Text>
-                <Text style={styles.pageSubtitle}>{previewFlow.summary}</Text>
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => setIsFlowMaximized(false)}
-                style={({pressed}) => [
-                  styles.secondaryButton,
-                  pressed && {backgroundColor: withOpacity(palette.primary, 0.08)},
-                ]}
-              >
-                <Icon name="minimize-2" size={14} color={palette.primary} />
-                <Text style={styles.secondaryButtonText}>Fechar</Text>
-              </Pressable>
-            </View>
-            <ScrollView
-              horizontal
-              style={styles.flowMaximizedScroll}
-              contentContainerStyle={styles.flowMaximizedHorizontalContent}
-              showsHorizontalScrollIndicator
-            >
-              <ScrollView
-                style={styles.flowMaximizedVerticalScroll}
-                contentContainerStyle={styles.flowMaximizedDiagramContent}
-                showsVerticalScrollIndicator
-              >
-                <MermaidDiagram chart={previewFlow} palette={palette} styles={styles} />
-              </ScrollView>
-            </ScrollView>
-          </View>
-        </View>
-      ) : null}
+      <FlowchartMaximizedOverlay
+        onClose={() => setIsFlowMaximized(false)}
+        palette={palette}
+        previewFlow={isFlowMaximized ? previewFlow : null}
+        styles={styles}
+      />
     </SafeAreaView>
   );
 }
